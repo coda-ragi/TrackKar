@@ -1,15 +1,17 @@
 {
   "expo": {
-    "name": "Tracker",
-    "slug": "Tracker",
+    "name": "TrackKar",
+    "slug": "tracker",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.tracker.app"
     },
     "android": {
+      "package": "com.tracker.app",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -20,6 +22,11 @@
     },
     "web": {
       "favicon": "./assets/favicon.png"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "dc3ed6ce-4b0f-4b0f-84c4-a0bde3b023f5"
+      }
     }
   }
 }

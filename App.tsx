@@ -1,20 +1,116 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { StatusBar } from 'expo-status-bar';
-import { StyleSheet, Text, View } from 'react-native';
+import { useEffect, useMemo, useState } from 'react';
+import { Alert, KeyboardAvoidingView, Modal, PanResponder, Platform, Pressable, SafeAreaView, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+
+const STORAGE_KEY = 'tracker-categories-v2';
+const WEEKDAYS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+const COLORS = ['#57d68d', '#f5b84b', '#5aa7ff', '#f47d9b', '#b68cff'];
+
+type Category = { id: string; name: string; color: string; counts: Record<string, number> };
+type Screen = 'today' | 'insights' | 'settings';
+const DEFAULT_CATEGORIES: Category[] = [{ id: 'mess', name: 'Mess', color: '#57d68d', counts: {} }];
+const dateKey = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+const dateFromKey = (key: string) => new Date(`${key}T12:00:00`);
+const isSameMonth = (first: Date, second: Date) => first.getFullYear() === second.getFullYear() && first.getMonth() === second.getMonth();
+const formatDate = (date: Date) => `${date.toLocaleDateString('en-US', { weekday: 'long' })}, ${MONTHS[date.getMonth()]} ${date.getDate()}`;
 
 export default function App() {
+  const today = useMemo(() => new Date(), []);
+  const todayKey = dateKey(today);
+  const [screen, setScreen] = useState<Screen>('today');
+  const [visibleMonth, setVisibleMonth] = useState(new Date(today.getFullYear(), today.getMonth(), 1));
+  const [categories, setCategories] = useState<Category[]>(DEFAULT_CATEGORIES);
+  const [selectedCategoryId, setSelectedCategoryId] = useState('mess');
+  const [isAddCategoryVisible, setIsAddCategoryVisible] = useState(false);
+  const [newCategoryName, setNewCategoryName] = useState('');
+
+  useEffect(() => {
+    AsyncStorage.getItem(STORAGE_KEY).then((saved) => {
+      if (!saved) return;
+      const parsed = JSON.parse(saved) as Category[];
+      if (parsed.length) { setCategories(parsed); setSelectedCategoryId(parsed[0].id); }
+    }).catch(() => undefined);
+  }, []);
+
+  const selectedCategory = categories.find((category) => category.id === selectedCategoryId) ?? categories[0];
+  const selectedCounts = selectedCategory?.counts ?? {};
+  const totalEntries = categories.reduce((total, category) => total + Object.values(category.counts).reduce((sum, count) => sum + count, 0), 0);
+  const activeDays = new Set(categories.flatMap((category) => Object.entries(category.counts).filter(([, count]) => count > 0).map(([key]) => key))).size;
+  const daysInMonth = new Date(visibleMonth.getFullYear(), visibleMonth.getMonth() + 1, 0).getDate();
+  const firstWeekday = new Date(visibleMonth.getFullYear(), visibleMonth.getMonth(), 1).getDay();
+  const calendarCells = Array.from({ length: firstWeekday + daysInMonth }, (_, index) => index < firstWeekday ? null : new Date(visibleMonth.getFullYear(), visibleMonth.getMonth(), index - firstWeekday + 1));
+  const monthCompletedCount = Object.entries(selectedCounts).reduce((total, [key, count]) => isSameMonth(dateFromKey(key), visibleMonth) ? total + count : total, 0);
+  const allTimeCount = Object.values(selectedCounts).reduce((total, count) => total + count, 0);
+  const todayCount = selectedCounts[todayKey] ?? 0;
+
+  const persist = (nextCategories: Category[]) => {
+    setCategories(nextCategories);
+    AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(nextCategories)).catch(() => undefined);
+  };
+  const updateDay = (date: Date, clear = false) => {
+    if (!selectedCategory) return;
+    const key = dateKey(date);
+    persist(categories.map((category) => {
+      if (category.id !== selectedCategory.id) return category;
+      const counts = { ...category.counts };
+      if (clear) delete counts[key]; else counts[key] = (counts[key] ?? 0) + 1;
+      return { ...category, counts };
+    }));
+  };
+  const addCategory = () => {
+    const name = newCategoryName.trim();
+    if (!name) return;
+    if (categories.some((category) => category.name.toLowerCase() === name.toLowerCase())) { Alert.alert('Category already exists', 'Choose a different name.'); return; }
+    const newCategory: Category = { id: `${name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-${Date.now()}`, name, color: COLORS[categories.length % COLORS.length], counts: {} };
+    persist([...categories, newCategory]); setSelectedCategoryId(newCategory.id); setNewCategoryName(''); setIsAddCategoryVisible(false);
+  };
+  const removeCategory = (category: Category) => {
+    if (categories.length === 1) { Alert.alert('Keep one category', 'TrackKar needs at least one category.'); return; }
+    Alert.alert(`Delete ${category.name}?`, 'Its history will be removed from this device.', [{ text: 'Cancel', style: 'cancel' }, { text: 'Delete', style: 'destructive', onPress: () => { const next = categories.filter((item) => item.id !== category.id); persist(next); if (category.id === selectedCategoryId) setSelectedCategoryId(next[0].id); } }]);
+  };
+  const resetAllData = () => Alert.alert('Reset all history?', 'This cannot be undone.', [{ text: 'Cancel', style: 'cancel' }, { text: 'Reset', style: 'destructive', onPress: () => persist(categories.map((category) => ({ ...category, counts: {} }))) }]);
+  const moveMonth = (amount: number) => setVisibleMonth(new Date(visibleMonth.getFullYear(), visibleMonth.getMonth() + amount, 1));
+  const calendarPanResponder = useMemo(() => PanResponder.create({
+    onMoveShouldSetPanResponder: (_, gestureState) => Math.abs(gestureState.dx) > Math.abs(gestureState.dy) && Math.abs(gestureState.dx) > 12,
+    onPanResponderRelease: (_, gestureState) => {
+      if (Math.abs(gestureState.dx) < 45) return;
+      const monthChange = gestureState.dx < 0 ? 1 : -1;
+      setVisibleMonth((currentMonth) => new Date(currentMonth.getFullYear(), currentMonth.getMonth() + monthChange, 1));
+    },
+  }), []);
+
   return (
-    <View style={styles.container}>
-      <Text>Open up App.tsx to start working on your app!</Text>
-      <StatusBar style="auto" />
-    </View>
+    <SafeAreaView style={styles.safeArea}>
+      <StatusBar style="light" />
+      <View style={styles.appShell}>
+        <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+          {screen === 'today' && <>
+            <View style={styles.header}><View><Text style={styles.eyebrow}>YOUR DAY</Text><Text style={styles.title}>{selectedCategory?.name ?? 'Track'}</Text><Text style={styles.dateLabel}>{formatDate(today)}</Text></View><View style={styles.todayBadge}><Text style={styles.todayBadgeLabel}>TODAY</Text><Text style={styles.todayBadgeNumber}>{today.getDate()}</Text></View></View>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.categoryRow}>{categories.map((category) => <Pressable key={category.id} onPress={() => setSelectedCategoryId(category.id)} style={[styles.categoryTab, selectedCategoryId === category.id && styles.categoryTabSelected]}><View style={[styles.categoryDot, { backgroundColor: category.color }]} /><Text style={[styles.categoryName, selectedCategoryId === category.id && styles.categoryNameSelected]}>{category.name}</Text></Pressable>)}<Pressable accessibilityLabel="Add category" onPress={() => setIsAddCategoryVisible(true)} style={styles.addCategoryButton}><Text style={styles.addCategoryText}>+</Text></Pressable></ScrollView>
+            <View style={styles.todayCard}><View><Text style={styles.cardEyebrow}>TODAY'S TOTAL</Text><Text style={styles.todayTotal}>{todayCount}</Text><Text style={styles.cardHint}>{todayCount === 0 ? 'Start with one small entry.' : 'Keep the rhythm going.'}</Text></View><Pressable onPress={() => updateDay(today)} style={styles.logButton}><Text style={styles.logButtonPlus}>+</Text><Text style={styles.logButtonText}>Log entry</Text></Pressable></View>
+            <View style={styles.summaryRow}><View><Text style={styles.summaryLabel}>This month</Text><Text style={styles.summaryValue}>{monthCompletedCount}</Text></View><View><Text style={styles.summaryLabel}>All time</Text><Text style={styles.summaryValue}>{allTimeCount}</Text></View><View style={styles.progressSummary}><Text style={styles.summaryLabel}>Monthly pace</Text><Text style={styles.summaryValue}>{Math.round((monthCompletedCount / daysInMonth) * 100)}%</Text></View></View><View style={styles.progressTrack}><View style={[styles.progressFill, { width: `${Math.min((monthCompletedCount / daysInMonth) * 100, 100)}%` }]} /></View>
+            <View {...calendarPanResponder.panHandlers} style={styles.calendarCard}><View style={styles.monthHeader}><View><Text style={styles.monthTitle}>{MONTHS[visibleMonth.getMonth()]}</Text><Text style={styles.yearLabel}>{visibleMonth.getFullYear()}</Text></View><View style={styles.monthControls}><Pressable accessibilityLabel="Previous month" onPress={() => moveMonth(-1)} style={styles.arrowButton}><Text style={styles.arrow}>{'<'}</Text></Pressable><Pressable accessibilityLabel="Next month" onPress={() => moveMonth(1)} style={styles.arrowButton}><Text style={styles.arrow}>{'>'}</Text></Pressable></View></View><View style={styles.weekdayRow}>{WEEKDAYS.map((weekday, index) => <Text key={`${weekday}-${index}`} style={styles.weekday}>{weekday}</Text>)}</View><View style={styles.calendarGrid}>{calendarCells.map((date, index) => { if (!date) return <View key={`empty-${index}`} style={styles.dayCell} />; const key = dateKey(date); const count = selectedCounts[key] ?? 0; const isToday = key === todayKey; return <Pressable key={key} accessibilityLabel={`${MONTHS[date.getMonth()]} ${date.getDate()}${count ? `, ${count} entries` : ''}`} onPress={() => updateDay(date)} onLongPress={() => updateDay(date, true)} style={[styles.dayCell, isToday && styles.todayCell]}><View style={[styles.dayNumber, isToday && styles.todayNumber]}><Text style={[styles.dayText, isToday && styles.todayText]}>{date.getDate()}</Text></View><View style={[styles.checkCircle, count > 0 && styles.checkCircleMarked]}>{count > 0 && <Text style={styles.checkMark}>✓</Text>}</View>{count > 1 && <Text style={styles.countText}>x{count}</Text>}</Pressable>; })}</View></View><Text style={styles.helperText}>Tap a day to add an entry. Hold to clear it.</Text>
+          </>}
+          {screen === 'insights' && <><View style={styles.pageHeader}><Text style={styles.eyebrow}>YOUR PROGRESS</Text><Text style={styles.pageTitle}>Insights</Text><Text style={styles.dateLabel}>A clear view of your consistency.</Text></View><View style={styles.insightHero}><Text style={styles.cardEyebrow}>ALL CATEGORIES</Text><Text style={styles.heroNumber}>{totalEntries}</Text><Text style={styles.cardHint}>total entries logged</Text><View style={styles.heroStats}><View><Text style={styles.heroStatValue}>{activeDays}</Text><Text style={styles.heroStatLabel}>active days</Text></View><View><Text style={styles.heroStatValue}>{categories.length}</Text><Text style={styles.heroStatLabel}>categories</Text></View><View><Text style={styles.heroStatValue}>{todayCount}</Text><Text style={styles.heroStatLabel}>today</Text></View></View></View><Text style={styles.sectionTitle}>Category breakdown</Text><View style={styles.breakdownCard}>{categories.map((category) => { const count = Object.values(category.counts).reduce((sum, value) => sum + value, 0); const share = totalEntries ? count / totalEntries : 0; return <View key={category.id} style={styles.breakdownRow}><View style={styles.breakdownTop}><View style={styles.breakdownName}><View style={[styles.categoryDot, { backgroundColor: category.color }]} /><Text style={styles.breakdownLabel}>{category.name}</Text></View><Text style={styles.breakdownValue}>{count}</Text></View><View style={styles.breakdownTrack}><View style={[styles.breakdownFill, { backgroundColor: category.color, width: `${Math.max(share * 100, count ? 4 : 0)}%` }]} /></View></View>; })}</View><Text style={styles.sectionTitle}>This month</Text><View style={styles.monthInsight}><Text style={styles.monthInsightNumber}>{monthCompletedCount}</Text><Text style={styles.cardHint}>entries in {MONTHS[today.getMonth()]}</Text><View style={styles.miniCalendar}><View style={[styles.miniBar, { height: Math.max(14, Math.min(monthCompletedCount * 4, 76)) }]} /><View style={[styles.miniBar, { height: Math.max(22, Math.min(activeDays * 3, 76)), backgroundColor: '#f5b84b' }]} /><View style={[styles.miniBar, { height: Math.max(10, Math.min(allTimeCount, 76)), backgroundColor: '#5aa7ff' }]} /></View></View></>}
+          {screen === 'settings' && <><View style={styles.pageHeader}><Text style={styles.eyebrow}>MAKE IT YOURS</Text><Text style={styles.pageTitle}>Settings</Text><Text style={styles.dateLabel}>Shape TrackKar around your routine.</Text></View><Text style={styles.sectionTitle}>Categories</Text><View style={styles.settingsCard}>{categories.map((category) => <View key={category.id} style={styles.settingRow}><View style={styles.settingName}><View style={[styles.categoryDot, { backgroundColor: category.color }]} /><Text style={styles.settingLabel}>{category.name}</Text></View><Pressable accessibilityLabel={`Delete ${category.name}`} onPress={() => removeCategory(category)}><Text style={styles.deleteText}>Remove</Text></Pressable></View>)}<Pressable onPress={() => setIsAddCategoryVisible(true)} style={styles.addRow}><Text style={styles.addRowPlus}>+</Text><Text style={styles.addRowText}>Add a category</Text></Pressable></View><Text style={styles.sectionTitle}>Data</Text><View style={styles.settingsCard}><Pressable onPress={resetAllData} style={styles.settingRow}><View><Text style={styles.settingLabel}>Reset history</Text><Text style={styles.settingDescription}>Clear every entry but keep categories</Text></View><Text style={styles.deleteText}>Reset</Text></Pressable></View><View style={styles.aboutBlock}><Text style={styles.aboutLogo}>TRACKKAR</Text><Text style={styles.aboutText}>A quiet place to build better rhythms.</Text><Text style={styles.aboutVersion}>Version 1.0.0</Text></View></>}
+        </ScrollView>
+        <View style={styles.bottomNav}>{([['today', 'Today'], ['insights', 'Insights'], ['settings', 'Settings']] as [Screen, string][]).map(([key, label]) => <Pressable key={key} onPress={() => setScreen(key)} style={styles.navItem}><Text style={[styles.navIcon, screen === key && styles.navIconActive]}>{key === 'today' ? '[]' : key === 'insights' ? '/\\' : 'o'}</Text><Text style={[styles.navLabel, screen === key && styles.navLabelActive]}>{label}</Text></Pressable>)}</View>
+      </View>
+      <Modal animationType="fade" transparent visible={isAddCategoryVisible} onRequestClose={() => setIsAddCategoryVisible(false)}><KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalBackdrop}><View style={styles.modalCard}><Text style={styles.modalTitle}>New category</Text><Text style={styles.modalSubtitle}>What would you like to track?</Text><TextInput autoFocus onChangeText={setNewCategoryName} onSubmitEditing={addCategory} placeholder="e.g. Water, Exercise" placeholderTextColor="#7e8b85" style={styles.categoryInput} value={newCategoryName} /><View style={styles.modalActions}><Pressable onPress={() => setIsAddCategoryVisible(false)} style={styles.cancelButton}><Text style={styles.cancelText}>Cancel</Text></Pressable><Pressable onPress={addCategory} style={styles.saveButton}><Text style={styles.saveText}>Add category</Text></Pressable></View></View></KeyboardAvoidingView></Modal>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#fff',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
+  safeArea: { flex: 1, backgroundColor: '#08100d' }, appShell: { flex: 1 }, content: { paddingHorizontal: 22, paddingTop: 24, paddingBottom: 28 },
+  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 26 }, pageHeader: { marginBottom: 28 }, eyebrow: { color: '#7a9184', fontSize: 11, fontWeight: '800', letterSpacing: 2, marginBottom: 9 }, title: { color: '#f3f7f3', fontSize: 34, fontWeight: '800' }, pageTitle: { color: '#f3f7f3', fontSize: 36, fontWeight: '800' }, dateLabel: { color: '#8da095', fontSize: 13, fontWeight: '600', marginTop: 7 },
+  todayBadge: { alignItems: 'center', backgroundColor: '#2a8c61', borderRadius: 17, paddingHorizontal: 14, paddingVertical: 10 }, todayBadgeLabel: { color: '#dffff0', fontSize: 9, fontWeight: '800', letterSpacing: 1 }, todayBadgeNumber: { color: '#fff', fontSize: 22, fontWeight: '800', marginTop: 2 }, categoryRow: { gap: 8, marginBottom: 18 }, categoryTab: { alignItems: 'center', backgroundColor: '#13221b', borderRadius: 18, flexDirection: 'row', paddingHorizontal: 14, paddingVertical: 10 }, categoryTabSelected: { backgroundColor: '#234232' }, categoryDot: { borderRadius: 5, height: 10, marginRight: 8, width: 10 }, categoryName: { color: '#91a397', fontSize: 14, fontWeight: '700' }, categoryNameSelected: { color: '#f2fff6' }, addCategoryButton: { alignItems: 'center', borderColor: '#496355', borderRadius: 18, borderWidth: 1, height: 40, justifyContent: 'center', width: 40 }, addCategoryText: { color: '#c8d7cd', fontSize: 25, fontWeight: '300', lineHeight: 27 },
+  todayCard: { backgroundColor: '#d9f5df', borderRadius: 24, flexDirection: 'row', justifyContent: 'space-between', marginBottom: 20, padding: 20 }, cardEyebrow: { color: '#5b7c68', fontSize: 10, fontWeight: '800', letterSpacing: 1.5 }, todayTotal: { color: '#102319', fontSize: 54, fontWeight: '800', lineHeight: 62, marginTop: 3 }, cardHint: { color: '#6d8276', fontSize: 13, fontWeight: '600', marginTop: 1 }, logButton: { alignItems: 'center', alignSelf: 'center', backgroundColor: '#123e2b', borderRadius: 16, justifyContent: 'center', minHeight: 76, paddingHorizontal: 16 }, logButtonPlus: { color: '#baf4ca', fontSize: 25, lineHeight: 25 }, logButtonText: { color: '#e6ffed', fontSize: 12, fontWeight: '800', marginTop: 5 },
+  summaryRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 11 }, summaryLabel: { color: '#789083', fontSize: 12, fontWeight: '700' }, summaryValue: { color: '#edf7ef', fontSize: 22, fontWeight: '800', marginTop: 3 }, progressSummary: { alignItems: 'flex-end' }, progressTrack: { backgroundColor: '#1c3126', borderRadius: 4, height: 6, marginBottom: 21, overflow: 'hidden' }, progressFill: { backgroundColor: '#57d68d', borderRadius: 4, height: '100%' },
+  calendarCard: { backgroundColor: '#0d1712', borderColor: '#20372a', borderRadius: 24, borderWidth: 1, padding: 19 }, monthHeader: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between', marginBottom: 23 }, monthTitle: { color: '#f2f8f3', fontSize: 23, fontWeight: '800' }, yearLabel: { color: '#789083', fontSize: 13, fontWeight: '600', marginTop: 2 }, monthControls: { flexDirection: 'row', gap: 8 }, arrowButton: { alignItems: 'center', backgroundColor: '#1a2b21', borderRadius: 13, height: 40, justifyContent: 'center', width: 40 }, arrow: { color: '#d5e8da', fontSize: 22 }, weekdayRow: { flexDirection: 'row', marginBottom: 8 }, weekday: { color: '#6e8778', flex: 1, fontSize: 11, fontWeight: '800', textAlign: 'center' }, calendarGrid: { flexDirection: 'row', flexWrap: 'wrap' }, dayCell: { alignItems: 'center', height: 64, justifyContent: 'flex-start', paddingTop: 5, width: '14.2857%' }, todayCell: { backgroundColor: '#183729', borderRadius: 15 }, dayNumber: { alignItems: 'center', borderRadius: 14, height: 28, justifyContent: 'center', width: 28 }, todayNumber: { backgroundColor: '#2a8c61' }, dayText: { color: '#e1ece3', fontSize: 14, fontWeight: '700' }, todayText: { color: '#fff' }, checkCircle: { alignItems: 'center', borderColor: '#385343', borderRadius: 9, borderWidth: 1.5, height: 18, justifyContent: 'center', marginTop: 6, width: 18 }, checkCircleMarked: { backgroundColor: '#57d68d', borderColor: '#57d68d' }, checkMark: { color: '#0a2515', fontSize: 13, fontWeight: '800' }, countText: { color: '#a7c0af', fontSize: 11, fontWeight: '800', marginTop: 2 }, helperText: { color: '#789083', fontSize: 12, fontWeight: '600', marginTop: 16, textAlign: 'center' },
+  insightHero: { backgroundColor: '#163b2a', borderRadius: 24, marginBottom: 28, padding: 22 }, heroNumber: { color: '#ebfff0', fontSize: 60, fontWeight: '800', lineHeight: 68, marginTop: 2 }, heroStats: { borderTopColor: '#315a43', borderTopWidth: 1, flexDirection: 'row', justifyContent: 'space-between', marginTop: 20, paddingTop: 16 }, heroStatValue: { color: '#e1f8e6', fontSize: 20, fontWeight: '800' }, heroStatLabel: { color: '#9fc3aa', fontSize: 11, fontWeight: '700', marginTop: 3 }, sectionTitle: { color: '#e6f1e8', fontSize: 17, fontWeight: '800', marginBottom: 12 }, breakdownCard: { backgroundColor: '#0d1712', borderColor: '#20372a', borderRadius: 20, borderWidth: 1, marginBottom: 27, padding: 18 }, breakdownRow: { marginBottom: 17 }, breakdownTop: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8 }, breakdownName: { alignItems: 'center', flexDirection: 'row' }, breakdownLabel: { color: '#dfebe1', fontSize: 14, fontWeight: '700' }, breakdownValue: { color: '#c7d8cb', fontSize: 14, fontWeight: '800' }, breakdownTrack: { backgroundColor: '#1c3024', borderRadius: 4, height: 7, overflow: 'hidden' }, breakdownFill: { borderRadius: 4, height: '100%' }, monthInsight: { backgroundColor: '#0d1712', borderColor: '#20372a', borderRadius: 20, borderWidth: 1, minHeight: 155, padding: 18 }, monthInsightNumber: { color: '#eff9f1', fontSize: 34, fontWeight: '800', marginTop: 4 }, miniCalendar: { alignItems: 'flex-end', bottom: 18, flexDirection: 'row', gap: 7, position: 'absolute', right: 20 }, miniBar: { backgroundColor: '#57d68d', borderRadius: 4, width: 13 },
+  settingsCard: { backgroundColor: '#0d1712', borderColor: '#20372a', borderRadius: 20, borderWidth: 1, marginBottom: 27, overflow: 'hidden' }, settingRow: { alignItems: 'center', borderBottomColor: '#20372a', borderBottomWidth: 1, flexDirection: 'row', justifyContent: 'space-between', minHeight: 67, paddingHorizontal: 18 }, settingName: { alignItems: 'center', flexDirection: 'row' }, settingLabel: { color: '#e4eee6', fontSize: 15, fontWeight: '700' }, settingDescription: { color: '#789083', fontSize: 12, fontWeight: '600', marginTop: 4 }, deleteText: { color: '#f47d9b', fontSize: 12, fontWeight: '800' }, addRow: { alignItems: 'center', flexDirection: 'row', minHeight: 60, paddingHorizontal: 18 }, addRowPlus: { color: '#57d68d', fontSize: 21, marginRight: 10 }, addRowText: { color: '#57d68d', fontSize: 14, fontWeight: '800' }, aboutBlock: { alignItems: 'center', paddingVertical: 18 }, aboutLogo: { color: '#57d68d', fontSize: 13, fontWeight: '900', letterSpacing: 3 }, aboutText: { color: '#789083', fontSize: 12, fontWeight: '600', marginTop: 9 }, aboutVersion: { color: '#4f6657', fontSize: 11, fontWeight: '700', marginTop: 8 },
+  bottomNav: { backgroundColor: '#0b1510', borderTopColor: '#20372a', borderTopWidth: 1, flexDirection: 'row', paddingBottom: Platform.OS === 'android' ? 10 : 4, paddingTop: 9 }, navItem: { alignItems: 'center', flex: 1, minHeight: 48 }, navIcon: { color: '#5e7768', fontSize: 15, fontWeight: '800', height: 20 }, navIconActive: { color: '#57d68d' }, navLabel: { color: '#6d8475', fontSize: 11, fontWeight: '700', marginTop: 4 }, navLabelActive: { color: '#d4f5dc' }, modalBackdrop: { alignItems: 'center', backgroundColor: 'rgba(0, 0, 0, 0.72)', flex: 1, justifyContent: 'center', padding: 24 }, modalCard: { backgroundColor: '#15221a', borderColor: '#2b4937', borderRadius: 23, borderWidth: 1, padding: 24, width: '100%' }, modalTitle: { color: '#f0f8f1', fontSize: 23, fontWeight: '800' }, modalSubtitle: { color: '#91a798', fontSize: 14, marginTop: 5 }, categoryInput: { backgroundColor: '#23382a', borderRadius: 14, color: '#f0f8f1', fontSize: 16, marginTop: 20, paddingHorizontal: 14, paddingVertical: 13 }, modalActions: { flexDirection: 'row', gap: 10, justifyContent: 'flex-end', marginTop: 18 }, cancelButton: { borderRadius: 14, paddingHorizontal: 16, paddingVertical: 12 }, cancelText: { color: '#a6b9aa', fontSize: 14, fontWeight: '700' }, saveButton: { backgroundColor: '#57d68d', borderRadius: 14, paddingHorizontal: 19, paddingVertical: 12 }, saveText: { color: '#092014', fontSize: 14, fontWeight: '800' },
 });
